@@ -11,20 +11,25 @@ does not currently carry) — shipping a real generic bus now and treating each 
 its own later, separately-scoped integration is the honest call, rather than half-building four
 platform bridges at once.
 
-TRUST MODEL (read this before you deploy the bus): the `agent` sender is caller-asserted. There is
-no authentication, signing, or per-agent identity — anyone with local write access to the bus file
-can post as any agent name, and the log carries no message id, nonce, or tamper-evidence. Use the
-bus only inside a trust boundary you already control (a single machine / a set of processes you
-already trust). See README.md and SECURITY.md for the full statement and the optional hardening
-(per-agent key/HMAC, message-id + hash-chain) left as a deliberate product decision.
+TRUST MODEL (read this before you deploy the bus): the `agent` sender carries a per-agent identity.
+When the bus is given a `Keyring`, each post is signed with an HMAC-SHA256 over its canonical
+(channel, agent, text, ts) tuple using the sending agent's registered key, and a read verifies that
+signature against the same agent's key — a message from an agent that does not hold the key (or an
+old unsigned message) reads back flagged UNVERIFIED rather than being trusted or dropped. The keys
+live in a local 0600 file, so this authenticates *between agents that do not share a key*; it is not
+a defense against a same-user attacker who can read that file. A bus constructed without a keyring
+keeps the original unauthenticated behaviour (the documented local-trust mode). See README.md and
+SECURITY.md for the full statement.
 """
 from __future__ import annotations
 
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+
+from .keyring import Keyring, sign as _sign, verify as _verify
 
 # A single posted message's `text` is capped so one post cannot append an unbounded line to the
 # shared log (which would blow up every reader's memory and every subsequent read). This is a
@@ -36,21 +41,38 @@ MAX_TEXT_BYTES = 1 << 20  # 1 MiB of UTF-8 per message
 _TAIL_CHUNK = 65536
 
 
+class UnregisteredAgentError(ValueError):
+    """Raised by `post` when the bus has a keyring but the sending agent has no key. A subclass of
+    `ValueError` so callers already handling bad input catch it too; the message says how to fix it
+    (register the agent). Bypass registration entirely with the documented no-auth mode."""
+
+
 @dataclass(frozen=True)
 class Message:
     channel: str
     agent: str
     text: str
     ts: float
+    # HMAC-SHA256 (hex) over the canonical tuple, present when the message was signed at post time.
+    # Empty for messages posted without a keyring (the local-trust mode) and for pre-identity logs.
+    hmac: str = ""
+    # Read-time verdict, never stored: True = signature verified, False = missing/invalid signature
+    # or unknown agent (UNVERIFIED), None = not checked (read without a keyring).
+    verified: "bool | None" = None
 
 
 class MessageBus:
     """Real, file-backed, append-only message bus. One real JSONL file, one real line per real
     posted message — same real append-only shape a shared log needs, built fresh here rather than
-    imported from anywhere else."""
+    imported from anywhere else.
 
-    def __init__(self, path: str | Path):
+    Pass a `Keyring` to turn on per-agent identity: posts are signed and reads are verified. Without
+    one the bus behaves exactly as before — unsigned posts, unverified reads (the local-trust mode).
+    """
+
+    def __init__(self, path: str | Path, keyring: Keyring | None = None):
         self.path = Path(path)
+        self.keyring = keyring
 
     def post(self, channel: str, agent: str, text: str) -> Message:
         if not channel:
@@ -61,11 +83,22 @@ class MessageBus:
             raise ValueError(
                 f"message text is too large (max {MAX_TEXT_BYTES} bytes of UTF-8)"
             )
-        msg = Message(channel=channel, agent=agent, text=text, ts=time.time())
+        ts = time.time()
+        record = {"channel": channel, "agent": agent, "text": text, "ts": ts}
+        mac = ""
+        if self.keyring is not None:
+            # Identity is on: the agent must be registered, and the post is signed with its key.
+            # Deny-by-default on TRUST — an unregistered agent cannot mint a trusted message.
+            key = self.keyring.get(agent)
+            if key is None:
+                raise UnregisteredAgentError(
+                    f"agent {agent!r} is not registered — run: dan-oss-bridge register {agent}"
+                )
+            mac = _sign(key, channel, agent, text, ts)
+            record["hmac"] = mac
+        msg = Message(channel=channel, agent=agent, text=text, ts=ts, hmac=mac)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({
-            "channel": msg.channel, "agent": msg.agent, "text": msg.text, "ts": msg.ts,
-        }) + "\n"
+        line = json.dumps(record) + "\n"
         # Append-only, one line per message (unchanged shape). flush + fsync make a returned
         # post best-effort durable on disk; fsync is best-effort because some filesystems /
         # platforms don't support it, and there is intentionally no atomic rename — a concurrent
@@ -101,9 +134,12 @@ class MessageBus:
             ts = float(d.get("ts", 0.0))
         except (TypeError, ValueError):
             ts = 0.0  # keep the message; a bad timestamp shouldn't drop or crash the read
+        mac = d.get("hmac", "")
+        if not isinstance(mac, str):
+            mac = ""  # a non-string hmac (forged/corrupt) is treated as no signature
         return Message(
             channel=d.get("channel", ""), agent=d.get("agent", ""),
-            text=d.get("text", ""), ts=ts,
+            text=d.get("text", ""), ts=ts, hmac=mac,
         )
 
     def _read_tail(self, channel: str | None, limit: int) -> list[Message]:
@@ -158,12 +194,30 @@ class MessageBus:
         `limit` is the size of the most-recent window returned. `limit <= 0` returns nothing (an
         empty list) — it is a cap, not an offset, so a zero or negative cap means "no messages"
         rather than "all messages". Corrupt lines (bad UTF-8, non-JSON, non-dict, bad ts) are
-        skipped individually; one bad line never denies the read to every agent."""
+        skipped individually; one bad line never denies the read to every agent.
+
+        When the bus has a keyring, each returned message is tagged `verified` (True/False) by
+        checking its HMAC against the sending agent's key — an unsigned message, a bad signature,
+        or an unknown agent reads back `verified=False` (UNVERIFIED), never dropped. Without a
+        keyring, `verified` is left None (not checked)."""
         if limit <= 0:
             return []
         if not self.path.is_file():
             return []
-        return self._read_tail(channel, limit)
+        msgs = self._read_tail(channel, limit)
+        if self.keyring is not None:
+            msgs = [replace(m, verified=self._verify(m)) for m in msgs]
+        return msgs
+
+    def _verify(self, m: Message) -> bool:
+        """True only if the message carries a valid signature for its agent's current key. A
+        missing signature, a bad one, or an unknown agent is UNVERIFIED (False), never an error."""
+        if self.keyring is None:
+            return False
+        key = self.keyring.get(m.agent)
+        if key is None:
+            return False
+        return _verify(key, m.channel, m.agent, m.text, m.ts, m.hmac)
 
     def channels(self) -> list[str]:
         """Every real channel name that has ever received a real post — real, derived from the
