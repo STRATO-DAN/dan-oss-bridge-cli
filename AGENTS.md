@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Context for AI coding assistants (Claude, Copilot, Cursor, etc.) working in this repository.
+Context for AI coding assistants working in this repository.
 
 ## What this repo is
 
@@ -36,8 +36,8 @@ codebase with any other DAN-OSS tool (they're separate Node.js packages).
     internal service URLs). If a design decision genuinely needs explaining, explain the
     *reasoning* in a way a stranger with zero internal context could follow — not a pointer to an
     internal ticket they can't see.
-  - **Never add an AI-attribution line to a commit or PR in this repo** (`Co-Authored-By: Claude`,
-    "Generated with Claude Code", or similar) — this is a real, standing, deliberately enforced
+  - **Never add an AI-attribution line to a commit or PR in this repo** (`Co-Authored-By: a tool`,
+    "Generated with a coding tool", or similar) — this is a real, standing, deliberately enforced
     rule for this org, not an oversight if it's missing.
 - **Test what you change.** If a change is claimed to work, it should have actually been run
   (`python3 -m unittest discover -s tests -v`) — a syntax check is not a functional test.
