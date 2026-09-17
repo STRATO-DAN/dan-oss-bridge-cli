@@ -4,7 +4,7 @@ import io
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -43,6 +43,16 @@ class CliTests(unittest.TestCase):
         code, out = self._run("channels")
         self.assertEqual(code, 0)
         self.assertIn("alpha", out)
+
+    def test_cli9_a_bus_path_that_is_a_directory_gives_a_friendly_error(self):
+        # --bus pointing at a directory used to surface a raw IsADirectoryError traceback.
+        dir_path = str(Path(self._tmp.name))  # the temp dir itself, not a file inside it
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        with redirect_stdout(buf_out), redirect_stderr(buf_err):
+            code = main(["--bus", dir_path, "post", "c", "a", "hi"])
+        self.assertEqual(code, 2)
+        self.assertIn("error:", buf_err.getvalue())
+        self.assertNotIn("Traceback", buf_err.getvalue())
 
 
 if __name__ == "__main__":

@@ -25,36 +25,47 @@ def main(argv: list[str] | None = None) -> int:
 
     p_read = sub.add_parser("read", help="read real messages")
     p_read.add_argument("channel", nargs="?", default=None)
-    p_read.add_argument("--limit", type=int, default=50)
+    p_read.add_argument("--limit", type=int, default=50,
+                        help="most-recent messages to return; <= 0 returns nothing (default: 50)")
 
     sub.add_parser("channels", help="list every real channel that has received a post")
 
     args = parser.parse_args(argv)
     bus = MessageBus(args.bus or _default_bus_path())
 
-    if args.command == "post":
-        bus.post(args.channel, args.agent, args.text)
-        print(f"posted to {args.channel!r}")
-        return 0
-
-    if args.command == "read":
-        msgs = bus.read(args.channel, limit=args.limit)
-        if not msgs:
-            print("no real messages yet" if args.channel is None
-                  else f"no real messages yet on {args.channel!r}")
+    try:
+        if args.command == "post":
+            bus.post(args.channel, args.agent, args.text)
+            print(f"posted to {args.channel!r}")
             return 0
-        for m in msgs:
-            print(f"[{m.channel}] {m.agent}: {m.text}")
-        return 0
 
-    if args.command == "channels":
-        names = bus.channels()
-        if not names:
-            print("no real channels yet")
+        if args.command == "read":
+            msgs = bus.read(args.channel, limit=args.limit)
+            if not msgs:
+                print("no real messages yet" if args.channel is None
+                      else f"no real messages yet on {args.channel!r}")
+                return 0
+            for m in msgs:
+                print(f"[{m.channel}] {m.agent}: {m.text}")
             return 0
-        for name in names:
-            print(name)
-        return 0
+
+        if args.command == "channels":
+            names = bus.channels()
+            if not names:
+                print("no real channels yet")
+                return 0
+            for name in names:
+                print(name)
+            return 0
+    except ValueError as e:
+        # bad input (empty channel/agent, oversize text) — a clear message, not a traceback
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        # bad bus path (e.g. --bus pointing at a directory -> IsADirectoryError), permission
+        # errors, etc. — surface a friendly one-liner instead of a raw traceback.
+        print(f"error: cannot use bus file {str(bus.path)!r}: {e}", file=sys.stderr)
+        return 2
 
     return 1  # pragma: no cover
 
