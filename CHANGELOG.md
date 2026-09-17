@@ -3,6 +3,42 @@
 All notable changes to `dan-oss-bridge` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.4.0]
+
+Cross-cutting polish: the CLI now speaks JSON on every read path, documents a uniform exit-code
+contract, and ships a `Makefile` of reproducible developer tasks. Purely additive — no runtime
+dependencies, no behaviour change to any existing command, and the default (human-readable) output
+of every command is unchanged.
+
+Added:
+
+- **`--json` on `read` and `channels`.** `read --json` prints a JSON array of
+  `{channel, agent, text, ts, verified}` objects (an empty array when there are no messages);
+  `channels --json` prints a JSON list of channel names. Human output stays the default; `--json` is
+  opt-in. (`verify --json` already existed since 0.3.0.) The `verified` field is the read-time
+  verdict — `true`/`false`, or `null` when identity is off.
+- **Top-level `--version`.** Prints `dan-oss-bridge <version>` (sourced from
+  `dan_oss_bridge.__version__`) and exits `0`; `--help` is provided by argparse as before.
+- **`Makefile` with uniform targets + `make help`.** `make test` runs the full suite;
+  `make attack` runs only the adversarial tests (tamper detection, forged/unsigned/unregistered
+  identity, corrupt-line tolerance); `make demo` is a reproducible post → verify → tamper → verify
+  walk-through proving the `0`/`1` exit codes; `make bench` measures tail-bounded read latency at
+  1k / 10k / 100k messages. Stdlib only — no build tooling required.
+- **`BENCHMARKS.md` + `tools/bench_read.py`.** Real measured numbers showing `read --limit 50`
+  latency stays flat as the log grows 100×, plus how to reproduce them (`make bench`).
+
+Documentation:
+
+- **README:** a new "Scriptable & CI" section documenting the `--json` read paths and the exit-code
+  contract (`0` ok / `1` verify-found-tampering / `2` usage or bad input), a "Try the attacks:
+  `make attack`" pointer, and a link to `BENCHMARKS.md`. Flags table, project-contents table, and
+  the tests section updated (now **69 tests**).
+
+Tests:
+
+- Added CLI coverage for `read --json` / `channels --json` (including empty results) and `--version`
+  (64 → 69 tests, all passing).
+
 ## [0.3.0]
 
 Whole-log tamper-evidence — a bus that can prove its own log wasn't altered. The per-message HMAC

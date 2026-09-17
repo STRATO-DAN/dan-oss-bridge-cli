@@ -5,6 +5,7 @@ register agents before they post. The identity-specific behaviour lives in test_
 """
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from dan_oss_bridge import __version__                                        # noqa: E402
 from dan_oss_bridge.cli import main                                           # noqa: E402
 
 
@@ -52,6 +54,52 @@ class CliTests(unittest.TestCase):
         code, out = self._run("channels")
         self.assertEqual(code, 0)
         self.assertIn("alpha", out)
+
+    def test_read_json_emits_a_parseable_array_of_message_objects(self):
+        self._run("register", "agent-a")
+        self._run("post", "standup", "agent-a", "a real message")
+        code, out = self._run("read", "standup", "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)  # must be valid JSON
+        self.assertIsInstance(data, list)
+        self.assertEqual(len(data), 1)
+        rec = data[0]
+        self.assertEqual(rec["channel"], "standup")
+        self.assertEqual(rec["agent"], "agent-a")
+        self.assertEqual(rec["text"], "a real message")
+        self.assertIn("ts", rec)
+        # signed post from a registered agent -> verified true under default identity.
+        self.assertTrue(rec["verified"])
+
+    def test_read_json_on_an_empty_channel_is_an_empty_array_not_prose(self):
+        code, out = self._run("read", "empty-channel", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), [])
+        self.assertNotIn("no real messages", out)
+
+    def test_channels_json_emits_a_parseable_list_of_names(self):
+        self._run("register", "x")
+        self._run("post", "alpha", "x", "1")
+        self._run("post", "beta", "x", "2")
+        code, out = self._run("channels", "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertIsInstance(data, list)
+        self.assertIn("alpha", data)
+        self.assertIn("beta", data)
+
+    def test_channels_json_on_an_empty_bus_is_an_empty_list(self):
+        code, out = self._run("channels", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), [])
+
+    def test_version_flag_prints_the_package_version_and_exits_zero(self):
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as cm:
+            with redirect_stdout(buf):
+                main(["--version"])
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn(__version__, buf.getvalue())
 
     def test_cli9_a_bus_path_that_is_a_directory_gives_a_friendly_error(self):
         # --bus pointing at a directory used to surface a raw IsADirectoryError traceback.

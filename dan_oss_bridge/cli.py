@@ -16,6 +16,7 @@ import os
 import sys
 from pathlib import Path
 
+from . import __version__
 from .bus import MessageBus
 from .keyring import Keyring, default_keyring_path
 from .verify import format_report, report_to_dict, verify_log
@@ -37,6 +38,7 @@ def _chain_enabled(flag: bool) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dan-oss-bridge", description="A unified agent communication bus.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--bus", default=None, help="path to the real bus file (default: ~/.dan-oss-bridge/bus.jsonl)")
     parser.add_argument("--keyring", default=None,
                         help="path to the agent keyring (default: ~/.dan-oss-bridge/agents.json, "
@@ -60,8 +62,12 @@ def main(argv: list[str] | None = None) -> int:
     p_read.add_argument("channel", nargs="?", default=None)
     p_read.add_argument("--limit", type=int, default=50,
                         help="most-recent messages to return; <= 0 returns nothing (default: 50)")
+    p_read.add_argument("--json", action="store_true", dest="as_json",
+                        help="emit the messages as a JSON array (for scripts / CI)")
 
-    sub.add_parser("channels", help="list every real channel that has received a post")
+    p_channels = sub.add_parser("channels", help="list every real channel that has received a post")
+    p_channels.add_argument("--json", action="store_true", dest="as_json",
+                            help="emit the channel names as a JSON list (for scripts / CI)")
 
     p_verify = sub.add_parser("verify", help="audit the whole log for tamper-evidence "
                                              "(signatures + hash chain)")
@@ -99,6 +105,15 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "read":
             msgs = bus.read(args.channel, limit=args.limit)
+            if args.as_json:
+                # A JSON array of one object per message. verified is the read-time verdict
+                # (true/false, or null when identity is off) — never a stored field.
+                print(json.dumps([
+                    {"channel": m.channel, "agent": m.agent, "text": m.text,
+                     "ts": m.ts, "verified": m.verified}
+                    for m in msgs
+                ], indent=2))
+                return 0
             if not msgs:
                 print("no real messages yet" if args.channel is None
                       else f"no real messages yet on {args.channel!r}")
@@ -113,6 +128,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "channels":
             names = bus.channels()
+            if args.as_json:
+                print(json.dumps(names, indent=2))
+                return 0
             if not names:
                 print("no real channels yet")
                 return 0
