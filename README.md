@@ -21,9 +21,14 @@
 > process running as the same user that can read that file can still forge a signature. See
 > [Trust model](#trust-model) and [`SECURITY.md`](SECURITY.md).
 
+> 🔗 **Prove your own log wasn't tampered with.** Opt into `--chain` and every post is hash-chained
+> to the one before it, so `dan-oss-bridge verify` can prove no record was deleted, reordered, or
+> inserted — and it exits non-zero the moment it isn't, so it drops straight into CI. See
+> [Tamper-evidence](#tamper-evidence-the-hash-chain).
+
 A local coordination log for cooperating agents: any number of agents register a signing key, then
 post to and read from any number of named channels, all backed by one plain, append-only file. No
-server, no broker, no network — just a file, a keyring, and four commands.
+server, no broker, no network — just a file, a keyring, and five commands.
 
 ## Install
 
@@ -49,8 +54,10 @@ Pure standard library, so there is no dependency tree to resolve. Once it's publ
 ```bash
 dan-oss-bridge register <agent> [--rotate]       # create (or rotate) an agent's signing key
 dan-oss-bridge post <channel> <agent> "<text>"   # append a signed message to a channel
+dan-oss-bridge [--chain] post ...                # ...and hash-chain it for tamper-evidence
 dan-oss-bridge read  <channel> [--limit N]       # read a channel (default: 50 most recent)
 dan-oss-bridge channels                          # list every channel that has a message
+dan-oss-bridge verify [--json] [--strict]        # audit the whole log: signatures + hash chain
 ```
 
 An agent must be registered before it can post — registration mints a random secret key so its
@@ -108,6 +115,61 @@ $ DAN_OSS_BRIDGE_NO_AUTH=1 dan-oss-bridge post standup anyone "no key needed her
 posted to 'standup'
 ```
 
+## Tamper-evidence (the hash chain)
+
+The per-message signature proves a *signed message's own content* wasn't edited. It does **not**, on
+its own, catch a writer who **deletes, reorders, or inserts whole records** — the surviving
+signatures still verify. Opt into `--chain` and each post also stores `prev`, the SHA-256 of the
+record before it, so the whole log becomes a linked chain. `dan-oss-bridge verify` then walks the
+log end to end and proves the chain is unbroken — or names the exact line where it isn't.
+
+Real output from a live run — two chained posts, then an attacker edits a delivered message on disk:
+
+```console
+$ dan-oss-bridge register agent-a
+registered agent 'agent-a'; key stored in '/home/you/.dan-oss-bridge/agents.json'
+$ dan-oss-bridge --chain post standup agent-a "deploying v2"
+posted to 'standup'
+$ dan-oss-bridge --chain post standup agent-a "tests green"
+posted to 'standup'
+
+$ dan-oss-bridge verify
+  line 1: ok       chain=linked [standup] agent-a: deploying v2
+  line 2: ok       chain=linked [standup] agent-a: tests green
+
+2 record(s): 2 ok, 0 forged, 0 unsigned, 0 corrupt
+chain intact
+VERDICT: clean
+
+# --- an attacker edits a delivered message on disk ---
+$ dan-oss-bridge verify
+  line 1: FORGED   chain=linked [standup] agent-a: deploying BACKDOOR  <- signature does not match the record content
+  line 2: ok       chain=BROKEN [standup] agent-a: tests green  <- chain break: stored prev does not match the preceding record
+
+2 record(s): 1 ok, 1 forged, 0 unsigned, 0 corrupt
+CHAIN BROKEN at line 2
+VERDICT: TAMPERING DETECTED
+```
+
+The edit trips **both** layers independently: the signature no longer matches (`FORGED`), and the
+next record's `prev` no longer matches the edited record's new link (`chain=BROKEN`). `verify` exits
+`0` on a clean log and `1` on any tampering, so it works straight in CI:
+
+```bash
+dan-oss-bridge verify --strict   # also fail if any message is unsigned/unverified
+dan-oss-bridge verify --json     # the same audit as machine-readable JSON
+```
+
+Two deliberate boundaries, stated plainly:
+
+- **Chaining is opt-in and takes a lock.** A chained post takes a short exclusive file lock so the
+  read-tip-then-append stays atomic and the chain can't fork under concurrent writers — it trades
+  the default's lock-free concurrent appends for the integrity link. Without `--chain`, posts write
+  the exact original wire format and stay lock-free; `verify` still audits signatures.
+- **The chain can't detect a dropped *tail*.** Truncating the newest records leaves a shorter,
+  still-valid chain. Detecting a missing tail needs an external anchor (a recorded head hash), which
+  is out of scope for a single local file — see [`SECURITY.md`](SECURITY.md).
+
 ## Python API
 
 ```python
@@ -125,6 +187,15 @@ msgs[0].verified               # -> True (False = UNVERIFIED, None = not checked
 # Without a keyring: the original unauthenticated behaviour.
 plain = MessageBus("~/.dan-oss-bridge/bus.jsonl")
 plain.post("standup", "anyone", "no key needed")   # unsigned; read leaves verified = None
+
+# With chain=True: each post is hash-chained; verify_log audits the whole file.
+from dan_oss_bridge import verify_log
+chained = MessageBus("~/.dan-oss-bridge/bus.jsonl", keyring=keyring, chain=True)
+chained.post("standup", "agent-a", "deploying v2")
+report = verify_log("~/.dan-oss-bridge/bus.jsonl", keyring)
+report.chain_intact      # -> True (False if a record was deleted/reordered/inserted/edited)
+report.clean()           # -> True when no tampering; report.tampered is the inverse
+report.first_break_line  # -> the 1-based line of the first broken link, or None
 ```
 
 `Message` is a small dataclass — `channel`, `agent`, `text`, `ts` (a POSIX timestamp), plus `hmac`
@@ -142,8 +213,11 @@ when the bus has a keyring but the agent has no key.
 | `--keyring <path>` | `~/.dan-oss-bridge/agents.json` | Which agent keyring file to use (CLI flag) |
 | `DAN_OSS_BRIDGE_KEYRING` | *(unset)* | Same as `--keyring`, via environment (the flag wins if both are set) |
 | `DAN_OSS_BRIDGE_NO_AUTH` | *(unset)* | `1` disables identity: unsigned posts, unflagged reads, no registration required |
+| `--chain` | *(off)* | On `post`: hash-chain the record to the previous one for whole-log tamper-evidence |
+| `DAN_OSS_BRIDGE_CHAIN` | *(unset)* | Same as `--chain`, via environment (either one turns chaining on) |
 | `--rotate` | *(off)* | On `register`: replace an already-registered agent's key with a fresh one |
 | `--limit <N>` | `50` | On `read`: how many of the most-recent messages to return |
+| `--json` / `--strict` | *(off)* | On `verify`: emit JSON, and/or also fail on any unsigned/unverified record |
 
 ## What it never does
 
@@ -179,9 +253,12 @@ that buys you — and what it does not — before you deploy it:
   agent whose key is in it. Identity here separates *agents that don't share a key* — it does not
   protect against an attacker who already has local read access to your keyring. Pair it with OS
   file permissions and process isolation for the boundary you actually need.
-- **No cross-message tamper-evidence.** There is no message-id or hash chain, so a writer with file
-  access can still drop or reorder whole lines; per-message signatures detect edits to a signed
-  message's content, not deletion or replay of entire records.
+- **Cross-message tamper-evidence is available — opt in with `--chain`.** By default there is no
+  hash chain, so a writer with file access can drop, reorder, or insert whole lines and the
+  surviving per-message signatures still verify. Turn on `--chain` and each record links to the one
+  before it, so `verify` proves the whole log is intact or names the first broken line — catching
+  deletion, reordering, insertion, and in-place edits. Its one blind spot is a truncated *tail*
+  (dropping the newest records leaves a valid prefix); detecting that needs an external head anchor.
 - **`DAN_OSS_BRIDGE_NO_AUTH=1`** turns identity off entirely (unsigned posts, unflagged reads) for
   the original local-trust mode, where every writer of the file is already trusted.
 
@@ -218,16 +295,25 @@ Nothing is added to your environment beyond the package, and nothing phones home
 
 | Path | What it is |
 |---|---|
-| `dan_oss_bridge/cli.py` | The CLI entry point — `register` / `post` / `read` / `channels`. |
-| `dan_oss_bridge/bus.py` | `MessageBus` + `Message` — the append-only log, tail-bounded reads, corrupt-line-tolerant parsing, sign-on-post / verify-on-read. |
+| `dan_oss_bridge/cli.py` | The CLI entry point — `register` / `post` / `read` / `channels` / `verify`. |
+| `dan_oss_bridge/bus.py` | `MessageBus` + `Message` — the append-only log, tail-bounded reads, corrupt-line-tolerant parsing, sign-on-post / verify-on-read, and chained (`--chain`) append under a lock. |
 | `dan_oss_bridge/keyring.py` | `Keyring` — the local `0600` per-agent key store, plus the HMAC sign/verify helpers. |
-| `dan_oss_bridge/__init__.py` | Public exports (`MessageBus`, `Message`, `Keyring`, `UnregisteredAgentError`). |
+| `dan_oss_bridge/chain.py` | The hash-chain link function (`link_hash`, `GENESIS`) — pure, zero-dependency SHA-256 over a record's canonical fields. |
+| `dan_oss_bridge/verify.py` | `verify_log` — walks the whole log and produces the tamper-evidence audit (`LogReport`). |
+| `dan_oss_bridge/__init__.py` | Public exports (`MessageBus`, `Message`, `Keyring`, `UnregisteredAgentError`, `verify_log`, `link_hash`, …). |
 | `tests/` | Real unit tests (`python -m unittest discover -s tests`). |
 
 ## FAQ
 
 **Can two agents post at the same time?** Yes — writes are append-only single lines, so concurrent
-posts from separate processes interleave cleanly without corrupting each other.
+posts from separate processes interleave cleanly without corrupting each other. With `--chain`,
+concurrent posts serialize on a short file lock so the chain stays linear (the one deliberate
+tradeoff chaining makes for tamper-evidence).
+
+**Can I prove the log wasn't tampered with?** With `--chain`, yes: `dan-oss-bridge verify` proves no
+record was deleted, reordered, inserted, or edited, or names the first broken line, and exits
+non-zero on any tampering. See [Tamper-evidence](#tamper-evidence-the-hash-chain). Its one blind
+spot is a truncated tail (see [Trust model](#trust-model)).
 
 **Can I read across all channels at once?** `read` takes a channel; omit the channel argument to
 read across all of them. `channels` lists every channel that has received a post.
@@ -247,13 +333,16 @@ python -m unittest discover -s tests
 ```
 
 Runs the unit suite on the standard-library `unittest` runner — no dependencies to install. As of
-this release that's **39 tests, all passing**, covering the post/read/channels round-trip, channel
+this release that's **64 tests, all passing**, covering the post/read/channels round-trip, channel
 isolation and oldest-first ordering, the `--limit` tail read, and the full corrupt-input class
 (invalid UTF-8, non-JSON, valid-JSON non-object, bad timestamp) proving one bad line can't deny
-reads to the whole bus, plus oversized-text rejection and friendly CLI errors on a bad bus path —
-and the identity layer: registration writes a `0600` keyring, a signed post verifies on read, a
+reads to the whole bus, plus oversized-text rejection and friendly CLI errors on a bad bus path;
+the identity layer (registration writes a `0600` keyring, a signed post verifies on read, a
 forged/tampered/unsigned message reads `UNVERIFIED`, an unregistered agent can't post by default,
-and `DAN_OSS_BRIDGE_NO_AUTH=1` restores the unauthenticated post.
+`DAN_OSS_BRIDGE_NO_AUTH=1` restores the unauthenticated post); and the hash chain (a chained post
+links to the previous record and anchors to genesis, `verify` reports a clean log and detects
+deletion, reordering, insertion, and in-place edits at the exact line, `--strict`/`--json` behave,
+and the documented tail-truncation limit holds).
 
 ## Contributing
 

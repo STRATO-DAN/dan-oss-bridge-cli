@@ -7,7 +7,12 @@ A fresh, standalone implementation sharing zero code with any other project — 
 own README for the explicit, checked confirmation.
 """
 from .bus import Message, MessageBus, UnregisteredAgentError
+from .chain import GENESIS, link_hash
 from .keyring import Keyring
+from .verify import LogReport, RecordVerdict, verify_log
 
-__all__ = ["Message", "MessageBus", "UnregisteredAgentError", "Keyring"]
-__version__ = "0.2.0"
+__all__ = [
+    "Message", "MessageBus", "UnregisteredAgentError", "Keyring",
+    "verify_log", "LogReport", "RecordVerdict", "link_hash", "GENESIS",
+]
+__version__ = "0.3.0"
