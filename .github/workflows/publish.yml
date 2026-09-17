@@ -1,24 +1,25 @@
 name: Publish to PyPI
 
-# Publishes dan-oss-bridge to PyPI when a GitHub Release is published, using PyPI Trusted
-# Publishing (OIDC) — no API token or stored secret. The exact (owner, repo, workflow filename,
-# environment) below must match the pending/trusted publisher configured on PyPI for this project.
+# Publishes dan-oss-bridge to PyPI on a published GitHub Release (or a manual run), using PyPI
+# Trusted Publishing (OIDC) — no API token or stored secret. The (owner, repo, workflow filename,
+# environment) must match the trusted publisher configured on PyPI for this project.
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   publish:
-    name: Build sdist + wheel and publish
+    name: Build and publish
     runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/p/dan-oss-bridge
     permissions:
-      id-token: write   # required for PyPI Trusted Publishing (OIDC)
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -32,18 +33,13 @@ jobs:
           python -m pip install --upgrade build
           python -m build
 
-      - name: Verify version matches the release tag
+      - name: Verify the package version matches the release tag
+        if: github.event_name == 'release'
         run: |
-          PKG_VER="$(python - <<'PY'
-import tomllib
-print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])
-PY
-)"
-          TAG="${GITHUB_REF_NAME#v}"
+          PKG_VER=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          TAG=${GITHUB_REF_NAME#v}
           echo "package version: $PKG_VER  release tag: $TAG"
-          if [ "$PKG_VER" != "$TAG" ]; then
-            echo "::error::pyproject version ($PKG_VER) does not match the release tag ($TAG)"; exit 1
-          fi
+          test "$PKG_VER" = "$TAG"
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
