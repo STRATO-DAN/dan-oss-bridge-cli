@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dan-oss-bridge"
+version = "0.1.0"
+description = "A real, standalone, zero-dependency multi-channel agent communication bus."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+dan-oss-bridge = "dan_oss_bridge.cli:main"
+
+[tool.setuptools]
+packages = ["dan_oss_bridge"]
