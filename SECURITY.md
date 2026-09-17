@@ -40,10 +40,15 @@ not vulnerabilities — please don't file them as such:
   agent's key; it does **not** prove the writer isn't a local same-uid attacker who read the
   keyring. This is a deliberate, documented boundary — combine the tool with OS file permissions
   and process isolation for the trust boundary you actually need.
-- **No cross-message tamper-evidence or replay protection.** The per-message HMAC detects edits to
-  a signed message's own content, but the log carries no message id, nonce, or hash chain — a
-  writer with file access can still add, replay, reorder, or delete whole records, and a reader
-  cannot detect that. Unsigned messages (older logs, or posts made with identity disabled) read as
+- **Cross-message tamper-evidence is opt-in (`--chain`), and has one documented blind spot.** By
+  default the log carries no hash chain: the per-message HMAC detects edits to a signed message's
+  own content, but a writer with file access can add, reorder, or delete whole records and the
+  surviving signatures still verify. As of 0.3.0 you can opt into `--chain`, which links each record
+  to the SHA-256 of the record before it; `dan-oss-bridge verify` then detects deletion, reordering,
+  insertion, and in-place edits and reports the first broken line (exit non-zero). Its **one
+  intentional limit**: truncating the *newest* records leaves a shorter, still-valid chain — a
+  single local file cannot prove its own tail wasn't dropped without an external head anchor, which
+  is out of scope here. Unsigned messages (older logs, or posts made with identity disabled) read as
   `UNVERIFIED` rather than being trusted.
 - **`DAN_OSS_BRIDGE_NO_AUTH=1` disables identity** (unsigned posts, unflagged reads) for the
   original local-trust mode, intended for deployments where every writer of the bus file already
@@ -55,11 +60,16 @@ crashing every reader, and 0.2.0 keeps that tolerance while verifying signatures
 bad line can deny reads to the whole bus **is** a valid report against older versions — please
 upgrade to the latest release first.
 
-One hardening option is still held open as a **product decision** for a future version, welcome as
-design discussion rather than a vulnerability report:
+The **hash chain** that was previously held open here as a product decision shipped in 0.3.0
+(`--chain` + `dan-oss-bridge verify`), covering deletion, reordering, insertion, and in-place edits
+of whole records. What remains open, welcome as design discussion rather than a vulnerability
+report, is narrower:
 
-- a **message-id + hash-chain** to add replay- and tamper-evidence across records (the per-message
-  HMAC shipped in 0.2.0 does not cover deletion or replay of whole lines).
+- a **signed external head anchor** so a *truncated tail* (dropping the newest records) is also
+  detectable — the in-file chain cannot prove its own tail wasn't dropped without something recorded
+  outside the file.
+- **cross-machine transport and replay windows** — the bus is a single local file by design; a
+  networked, multi-writer deployment is a separate, larger undertaking.
 
 ## Scope
 

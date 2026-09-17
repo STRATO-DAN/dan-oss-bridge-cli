@@ -3,6 +3,49 @@
 All notable changes to `dan-oss-bridge` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.3.0]
+
+Whole-log tamper-evidence — a bus that can prove its own log wasn't altered. The per-message HMAC
+(0.2.0) proves a signed message's *own content* wasn't edited; it does not catch a writer who
+deletes, reorders, or inserts whole records. An opt-in hash chain closes that, and a new `verify`
+command audits it. Fully backward-compatible: the default wire format is unchanged.
+
+Added:
+
+- **`--chain` (or `DAN_OSS_BRIDGE_CHAIN=1`) hash-chains each post.** Every chained record stores
+  `prev`, the SHA-256 of the record before it (first record anchors to a genesis constant). The link
+  binds the record's content, its own signature, and its link to the prior record, so deletion,
+  reordering, insertion, or an in-place edit breaks the chain at the following record. New module
+  `dan_oss_bridge/chain.py` (`link_hash`, `GENESIS`) — pure stdlib `hashlib`/`json`.
+- **`dan-oss-bridge verify [--json] [--strict]`.** Walks the whole log (not a tail window) and
+  reports, per record, content authenticity (`ok`/`forged`/`unsigned`/`corrupt`) and chain status
+  (`linked`/`BROKEN`), plus a whole-log verdict and the first broken line. Exits `0` on a clean log
+  and `1` on tampering, so it drops into CI; `--strict` also fails on any unsigned/unverified record;
+  `--json` emits the audit as machine-readable JSON. New module `dan_oss_bridge/verify.py`
+  (`verify_log`, `LogReport`), exported from the package.
+
+Design notes (deliberate, documented):
+
+- **Chaining is opt-in because it changes the concurrency contract.** A chained post takes a short
+  exclusive `fcntl.flock` on a sibling `<bus>.lock` file so the read-tip-then-append is atomic and
+  the chain can't fork under concurrent writers — trading the default's lock-free concurrent appends
+  for the integrity link. The lock is advisory and auto-released by the OS if the writer dies; where
+  `fcntl` is unavailable (non-POSIX), chained mode assumes a single writer.
+- **The signature is unchanged.** The HMAC still covers `(channel, agent, text, ts)` exactly as in
+  0.2.0 and does *not* fold in the chain link, so signatures written before chaining existed still
+  verify. Content-authenticity (HMAC) and log-integrity (chain) are independent, composable layers.
+- **One honest limit:** the chain can't detect a truncated *tail* (dropping the newest records
+  leaves a valid prefix) — that needs an external head anchor, out of scope for a single local file.
+  See `SECURITY.md`.
+
+Preserved: the append-only shape, oldest-first ordering, tail-bounded reads, the `limit<=0` clamp,
+fsync-on-post durability, the per-message text cap, per-agent identity, and the full corrupt-line
+tolerance. The **default (unchained) post writes the exact 0.2.0 wire format, byte for byte** — no
+`prev` field — so existing logs and readers are unaffected.
+
+Zero runtime dependencies unchanged — the chain uses the standard library (`hashlib`, `json`) and
+the lock uses `fcntl`. 25 new tests (`tests/test_chain.py`), 64 total.
+
 ## [0.2.0]
 
 Per-agent identity — the `agent` sender is no longer just a free-text label. **Breaking**: posting

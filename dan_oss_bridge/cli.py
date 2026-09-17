@@ -1,18 +1,24 @@
-"""dan_oss_bridge.cli — the real CLI: `dan-oss-bridge register|post|read|channels`.
+"""dan_oss_bridge.cli — the real CLI: `dan-oss-bridge register|post|read|channels|verify`.
 
 Per-agent identity is ON by default: an agent must be registered (own a local key) before it can
 post, every post is signed, and reads flag any message that does not verify as UNVERIFIED. Set
 `DAN_OSS_BRIDGE_NO_AUTH=1` to restore the original unauthenticated behaviour (the local-trust mode).
+
+`--chain` (or `DAN_OSS_BRIDGE_CHAIN=1`) turns on whole-log tamper-evidence: each post is hash-chained
+to the one before it, so `dan-oss-bridge verify` can prove no record was deleted, reordered, or
+inserted. `verify` audits any log and exits non-zero if it finds tampering — usable straight in CI.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
 
 from .bus import MessageBus
 from .keyring import Keyring, default_keyring_path
+from .verify import format_report, report_to_dict, verify_log
 
 
 def _default_bus_path() -> str:
@@ -24,12 +30,20 @@ def _auth_disabled() -> bool:
     return os.environ.get("DAN_OSS_BRIDGE_NO_AUTH") == "1"
 
 
+def _chain_enabled(flag: bool) -> bool:
+    """True when hash-chaining is on for this invocation: the `--chain` flag or DAN_OSS_BRIDGE_CHAIN=1."""
+    return flag or os.environ.get("DAN_OSS_BRIDGE_CHAIN") == "1"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dan-oss-bridge", description="A unified agent communication bus.")
     parser.add_argument("--bus", default=None, help="path to the real bus file (default: ~/.dan-oss-bridge/bus.jsonl)")
     parser.add_argument("--keyring", default=None,
                         help="path to the agent keyring (default: ~/.dan-oss-bridge/agents.json, "
                              "or $DAN_OSS_BRIDGE_KEYRING)")
+    parser.add_argument("--chain", action="store_true",
+                        help="hash-chain each post to the previous one for whole-log "
+                             "tamper-evidence (or set DAN_OSS_BRIDGE_CHAIN=1); verify with `verify`")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_register = sub.add_parser("register", help="register an agent (create its signing key)")
@@ -49,6 +63,13 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("channels", help="list every real channel that has received a post")
 
+    p_verify = sub.add_parser("verify", help="audit the whole log for tamper-evidence "
+                                             "(signatures + hash chain)")
+    p_verify.add_argument("--json", action="store_true", dest="as_json",
+                          help="emit the audit as JSON (for scripts / CI)")
+    p_verify.add_argument("--strict", action="store_true",
+                          help="also fail (non-zero exit) if any message is unsigned or unverified")
+
     args = parser.parse_args(argv)
 
     keyring_path = args.keyring or default_keyring_path()
@@ -56,7 +77,8 @@ def main(argv: list[str] | None = None) -> int:
     # Identity is on unless explicitly disabled. When disabled, the bus is built with no keyring,
     # which restores the original unauthenticated post and unflagged read.
     bus_keyring = None if _auth_disabled() else keyring
-    bus = MessageBus(args.bus or _default_bus_path(), keyring=bus_keyring)
+    bus = MessageBus(args.bus or _default_bus_path(), keyring=bus_keyring,
+                     chain=_chain_enabled(args.chain))
 
     try:
         if args.command == "register":
@@ -97,6 +119,19 @@ def main(argv: list[str] | None = None) -> int:
             for name in names:
                 print(name)
             return 0
+
+        if args.command == "verify":
+            # Verify uses the keyring to check signatures even when NO_AUTH is set for posting —
+            # auditing is a read-only integrity check and should see the keys if they exist. The
+            # chain is checked with or without a keyring.
+            report = verify_log(bus.path, None if _auth_disabled() else keyring)
+            if args.as_json:
+                print(json.dumps(report_to_dict(report, strict=args.strict), indent=2))
+            else:
+                print(format_report(report, strict=args.strict))
+            # Exit code is the CI contract: 0 = clean, 1 = not clean (tampering, or — with
+            # --strict — unsigned/unverified records). Reserved 2 stays for bad input/usage.
+            return 0 if report.clean(strict=args.strict) else 1
     except ValueError as e:
         # bad input (empty channel/agent, oversize text, unregistered agent) — a clear message,
         # not a traceback.

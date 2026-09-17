@@ -23,13 +23,20 @@ SECURITY.md for the full statement.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .chain import GENESIS, link_hash
 from .keyring import Keyring, sign as _sign, verify as _verify
+
+try:
+    import fcntl  # POSIX advisory locks; auto-released by the OS if the writer process dies.
+except ImportError:  # pragma: no cover - non-POSIX (e.g. Windows)
+    fcntl = None
 
 # A single posted message's `text` is capped so one post cannot append an unbounded line to the
 # shared log (which would blow up every reader's memory and every subsequent read). This is a
@@ -56,6 +63,9 @@ class Message:
     # HMAC-SHA256 (hex) over the canonical tuple, present when the message was signed at post time.
     # Empty for messages posted without a keyring (the local-trust mode) and for pre-identity logs.
     hmac: str = ""
+    # Hash-chain link (hex SHA-256 of the preceding record), present only in a chained log. Empty
+    # for an unchained log (the default wire format). See chain.py and `verify`.
+    prev: str = ""
     # Read-time verdict, never stored: True = signature verified, False = missing/invalid signature
     # or unknown agent (UNVERIFIED), None = not checked (read without a keyring).
     verified: "bool | None" = None
@@ -68,11 +78,20 @@ class MessageBus:
 
     Pass a `Keyring` to turn on per-agent identity: posts are signed and reads are verified. Without
     one the bus behaves exactly as before — unsigned posts, unverified reads (the local-trust mode).
+
+    Pass `chain=True` to turn on whole-log tamper-evidence: each post stores `prev`, the hash of the
+    record before it, so a later `verify` can prove no record was deleted, reordered, or inserted
+    (see chain.py / `verify`). Chaining is opt-in because it changes the concurrency contract — a
+    chained post takes a short exclusive file lock so the read-tail-then-append stays atomic and the
+    chain stays linear, trading the default's lock-free concurrent appends for the integrity link.
+    The default (`chain=False`) writes the exact 0.2.0 wire format, byte for byte, and stays
+    lock-free. `verify` auto-detects whether a log is chained; it needs no flag.
     """
 
-    def __init__(self, path: str | Path, keyring: Keyring | None = None):
+    def __init__(self, path: str | Path, keyring: Keyring | None = None, chain: bool = False):
         self.path = Path(path)
         self.keyring = keyring
+        self.chain = chain
 
     def post(self, channel: str, agent: str, text: str) -> Message:
         if not channel:
@@ -84,7 +103,6 @@ class MessageBus:
                 f"message text is too large (max {MAX_TEXT_BYTES} bytes of UTF-8)"
             )
         ts = time.time()
-        record = {"channel": channel, "agent": agent, "text": text, "ts": ts}
         mac = ""
         if self.keyring is not None:
             # Identity is on: the agent must be registered, and the post is signed with its key.
@@ -94,10 +112,30 @@ class MessageBus:
                 raise UnregisteredAgentError(
                     f"agent {agent!r} is not registered — run: dan-oss-bridge register {agent}"
                 )
+            # The signature covers (channel, agent, text, ts) exactly as in 0.2.0 — it deliberately
+            # does NOT cover the chain link, so signatures written before chaining existed still
+            # verify. The hash chain (prev) binds ordering/completeness as a separate layer.
             mac = _sign(key, channel, agent, text, ts)
-            record["hmac"] = mac
-        msg = Message(channel=channel, agent=agent, text=text, ts=ts, hmac=mac)
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
+
+        if self.chain:
+            # Under the lock so the read-tip-then-append is atomic and the chain stays linear even
+            # with concurrent posters (the lock-free default cannot offer this — see _chain_lock).
+            with self._chain_lock():
+                prev = self._chain_tip_hash()
+                return self._append(channel, agent, text, ts, mac, prev)
+        return self._append(channel, agent, text, ts, mac, "")
+
+    def _append(self, channel: str, agent: str, text: str, ts: float, mac: str, prev: str) -> Message:
+        """Serialize and durably append one record. Fields that are empty (`hmac` in local-trust
+        mode, `prev` in an unchained log) are omitted, so an unchained/unsigned post writes the
+        exact original wire format byte for byte."""
+        record = {"channel": channel, "agent": agent, "text": text, "ts": ts}
+        if mac:
+            record["hmac"] = mac
+        if prev:
+            record["prev"] = prev
         line = json.dumps(record) + "\n"
         # Append-only, one line per message (unchanged shape). flush + fsync make a returned
         # post best-effort durable on disk; fsync is best-effort because some filesystems /
@@ -110,7 +148,41 @@ class MessageBus:
                 os.fsync(f.fileno())
             except OSError:
                 pass  # best-effort; not all targets support fsync
-        return msg
+        return Message(channel=channel, agent=agent, text=text, ts=ts, hmac=mac, prev=prev)
+
+    @contextlib.contextmanager
+    def _chain_lock(self):
+        """Best-effort exclusive lock serializing chained posts, so the read-tip-then-append stays
+        atomic and the chain does not fork under concurrent writers. Uses ``fcntl.flock`` on a
+        sibling ``<bus>.lock`` file — an advisory POSIX lock the OS releases automatically if the
+        writer process dies (no stale lock to clean up). Where ``fcntl`` is unavailable (non-POSIX),
+        this is a no-op and chained mode then assumes a single writer — see SECURITY.md."""
+        if fcntl is None:  # pragma: no cover - non-POSIX
+            yield
+            return
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+    def _chain_tip_hash(self) -> str:
+        """The link hash the next chained record must store as its ``prev``: the link of the current
+        last record, or GENESIS when the log is empty. Computed from the tip's own stored fields
+        (including its own ``prev``, which is empty for an unchained predecessor) so a verifier
+        walking the log forward recomputes the identical value."""
+        if not self.path.is_file():
+            return GENESIS
+        tail = self._read_tail(None, 1)
+        if not tail:
+            return GENESIS
+        m = tail[0]
+        return link_hash(m.prev, m.channel, m.agent, m.text, m.ts, m.hmac)
 
     @staticmethod
     def _parse_line(raw: bytes | str) -> Message | None:
@@ -137,9 +209,12 @@ class MessageBus:
         mac = d.get("hmac", "")
         if not isinstance(mac, str):
             mac = ""  # a non-string hmac (forged/corrupt) is treated as no signature
+        prev = d.get("prev", "")
+        if not isinstance(prev, str):
+            prev = ""  # a non-string prev (corrupt) is treated as unchained for this record
         return Message(
             channel=d.get("channel", ""), agent=d.get("agent", ""),
-            text=d.get("text", ""), ts=ts, hmac=mac,
+            text=d.get("text", ""), ts=ts, hmac=mac, prev=prev,
         )
 
     def _read_tail(self, channel: str | None, limit: int) -> list[Message]:
