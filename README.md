@@ -55,9 +55,10 @@ Pure standard library, so there is no dependency tree to resolve. Once it's publ
 dan-oss-bridge register <agent> [--rotate]       # create (or rotate) an agent's signing key
 dan-oss-bridge post <channel> <agent> "<text>"   # append a signed message to a channel
 dan-oss-bridge [--chain] post ...                # ...and hash-chain it for tamper-evidence
-dan-oss-bridge read  <channel> [--limit N]       # read a channel (default: 50 most recent)
-dan-oss-bridge channels                          # list every channel that has a message
+dan-oss-bridge read  <channel> [--limit N] [--json]  # read a channel (default: 50 most recent)
+dan-oss-bridge channels [--json]                 # list every channel that has a message
 dan-oss-bridge verify [--json] [--strict]        # audit the whole log: signatures + hash chain
+dan-oss-bridge --version                         # print the version (also: --help)
 ```
 
 An agent must be registered before it can post — registration mints a random secret key so its
@@ -170,6 +171,34 @@ Two deliberate boundaries, stated plainly:
   still-valid chain. Detecting a missing tail needs an external anchor (a recorded head hash), which
   is out of scope for a single local file — see [`SECURITY.md`](SECURITY.md).
 
+## Scriptable & CI
+
+Every read path speaks JSON, and every command speaks a stable exit code, so the bus drops into a
+pipeline without screen-scraping:
+
+```bash
+dan-oss-bridge read standup --json   # JSON array: [{channel, agent, text, ts, verified}, ...]
+dan-oss-bridge channels --json       # JSON list of channel names
+dan-oss-bridge verify --json         # the whole audit as machine-readable JSON
+```
+
+Human-readable output stays the default; `--json` is purely additive. The `verified` field is the
+read-time verdict — `true`/`false`, or `null` when identity is off.
+
+**Exit-code contract** (uniform across commands, safe to branch on in CI):
+
+| Code | Meaning |
+|------|---------|
+| `0`  | success — the command did what was asked (a clean `verify`, a completed `read`/`post`) |
+| `1`  | `verify` found tampering (a forged signature, a broken chain, or a corrupt line); with `--strict`, also any unsigned/unverified record |
+| `2`  | usage or bad input — unknown flags, a missing argument, an unregistered agent, an unusable bus path (a clear one-line error on stderr, never a traceback) |
+
+**Try the attacks:** `make attack` runs only the adversarial suite — tamper detection, forged /
+unregistered identity, and corrupt-line tolerance — and stays green because the library defends
+against each. See also `make demo` (a full post → verify → tamper → verify walk-through) and
+`make bench`, whose measured numbers live in [`BENCHMARKS.md`](BENCHMARKS.md): read latency stays
+flat as the log grows 100×, because a read is bounded by its `--limit` window, not the file size.
+
 ## Python API
 
 ```python
@@ -217,7 +246,9 @@ when the bus has a keyring but the agent has no key.
 | `DAN_OSS_BRIDGE_CHAIN` | *(unset)* | Same as `--chain`, via environment (either one turns chaining on) |
 | `--rotate` | *(off)* | On `register`: replace an already-registered agent's key with a fresh one |
 | `--limit <N>` | `50` | On `read`: how many of the most-recent messages to return |
-| `--json` / `--strict` | *(off)* | On `verify`: emit JSON, and/or also fail on any unsigned/unverified record |
+| `--json` | *(off)* | On `read`/`channels`/`verify`: emit machine-readable JSON instead of the human output |
+| `--strict` | *(off)* | On `verify`: also fail (exit `1`) on any unsigned/unverified record |
+| `--version` | — | Print the version and exit `0` (top-level; `--help` is also available) |
 
 ## What it never does
 
@@ -295,13 +326,16 @@ Nothing is added to your environment beyond the package, and nothing phones home
 
 | Path | What it is |
 |---|---|
-| `dan_oss_bridge/cli.py` | The CLI entry point — `register` / `post` / `read` / `channels` / `verify`. |
+| `dan_oss_bridge/cli.py` | The CLI entry point — `register` / `post` / `read` / `channels` / `verify`, `--json` on the read paths, `--version`. |
 | `dan_oss_bridge/bus.py` | `MessageBus` + `Message` — the append-only log, tail-bounded reads, corrupt-line-tolerant parsing, sign-on-post / verify-on-read, and chained (`--chain`) append under a lock. |
 | `dan_oss_bridge/keyring.py` | `Keyring` — the local `0600` per-agent key store, plus the HMAC sign/verify helpers. |
 | `dan_oss_bridge/chain.py` | The hash-chain link function (`link_hash`, `GENESIS`) — pure, zero-dependency SHA-256 over a record's canonical fields. |
 | `dan_oss_bridge/verify.py` | `verify_log` — walks the whole log and produces the tamper-evidence audit (`LogReport`). |
 | `dan_oss_bridge/__init__.py` | Public exports (`MessageBus`, `Message`, `Keyring`, `UnregisteredAgentError`, `verify_log`, `link_hash`, …). |
 | `tests/` | Real unit tests (`python -m unittest discover -s tests`). |
+| `Makefile` | Uniform developer tasks — `make test` / `attack` / `demo` / `bench` / `help` (stdlib only). |
+| `tools/bench_read.py` | The `make bench` script — measures tail-bounded read latency across log sizes. |
+| `BENCHMARKS.md` | Measured `make bench` numbers and how to reproduce them. |
 
 ## FAQ
 
@@ -329,11 +363,11 @@ been authenticated at all. See [Trust model](#trust-model).
 ## Tests
 
 ```bash
-python -m unittest discover -s tests
+python -m unittest discover -s tests   # or: make test
 ```
 
 Runs the unit suite on the standard-library `unittest` runner — no dependencies to install. As of
-this release that's **64 tests, all passing**, covering the post/read/channels round-trip, channel
+this release that's **69 tests, all passing**, covering the post/read/channels round-trip, channel
 isolation and oldest-first ordering, the `--limit` tail read, and the full corrupt-input class
 (invalid UTF-8, non-JSON, valid-JSON non-object, bad timestamp) proving one bad line can't deny
 reads to the whole bus, plus oversized-text rejection and friendly CLI errors on a bad bus path;
@@ -342,7 +376,12 @@ forged/tampered/unsigned message reads `UNVERIFIED`, an unregistered agent can't
 `DAN_OSS_BRIDGE_NO_AUTH=1` restores the unauthenticated post); and the hash chain (a chained post
 links to the previous record and anchors to genesis, `verify` reports a clean log and detects
 deletion, reordering, insertion, and in-place edits at the exact line, `--strict`/`--json` behave,
-and the documented tail-truncation limit holds).
+and the documented tail-truncation limit holds); and the CLI surface itself (`read`/`channels`
+`--json` emit parseable output, empty results stay empty JSON, and `--version` prints the version).
+
+`make attack` re-runs just the adversarial slice of that suite (tamper detection, forged/unsigned/
+unregistered identity, corrupt-line tolerance); `make demo` and `make bench` are described under
+[Scriptable & CI](#scriptable--ci). Run `make help` to list every target.
 
 ## Contributing
 
