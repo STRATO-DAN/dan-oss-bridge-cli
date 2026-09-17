@@ -6,7 +6,8 @@ Real, standalone, MIT-licensed. `MessageBus.post(channel, agent, text)` /
 A fresh, standalone implementation sharing zero code with any other project — see this package's
 own README for the explicit, checked confirmation.
 """
-from .bus import Message, MessageBus
+from .bus import Message, MessageBus, UnregisteredAgentError
+from .keyring import Keyring
 
-__all__ = ["Message", "MessageBus"]
-__version__ = "0.1.1"
+__all__ = ["Message", "MessageBus", "UnregisteredAgentError", "Keyring"]
+__version__ = "0.2.0"

@@ -27,31 +27,39 @@ disclosure, and we'll keep you updated on progress as we work through it.
 
 ## Trust model (by design)
 
-`dan-oss-bridge` is a **local, append-only, unauthenticated** message log. The following are
-**known, intentional properties of the current design**, not vulnerabilities — please don't file
-them as such:
+`dan-oss-bridge` is a **local, append-only** message log with **per-agent identity**. As of 0.2.0
+each agent registers a local secret key, every post is signed with an HMAC-SHA256 over its
+`(channel, agent, text, ts)`, and a read verifies that signature and flags anything that doesn't
+verify as `UNVERIFIED`. The following are **known, intentional properties of the current design**,
+not vulnerabilities — please don't file them as such:
 
-- **The `agent` sender is caller-asserted.** There is no authentication, signing, or per-agent
-  identity. Anyone with local write access to the bus file can post under any `agent` name. Treat
-  the sender as a label, not a proof of origin.
-- **No tamper-evidence or replay protection.** The log carries no message id, nonce, or hash
-  chain. Anyone who can write the file can add, replay, edit, or remove messages, and a reader
-  cannot detect it.
-- **Intended deployment is inside a trust boundary you already control** — a single machine or a
-  set of local processes that already trust one another. The bus is a coordination log for
-  cooperating agents, not a security boundary between mutually-distrusting parties.
+- **Identity authenticates *across agents that don't share a key*, not against a same-user
+  attacker.** The keys are stored in a local file (`~/.dan-oss-bridge/agents.json`, mode `0600`).
+  Any process running as the **same operating-system user** that can read that file can sign as any
+  agent whose key it holds. A verified message proves it was produced by something holding that
+  agent's key; it does **not** prove the writer isn't a local same-uid attacker who read the
+  keyring. This is a deliberate, documented boundary — combine the tool with OS file permissions
+  and process isolation for the trust boundary you actually need.
+- **No cross-message tamper-evidence or replay protection.** The per-message HMAC detects edits to
+  a signed message's own content, but the log carries no message id, nonce, or hash chain — a
+  writer with file access can still add, replay, reorder, or delete whole records, and a reader
+  cannot detect that. Unsigned messages (older logs, or posts made with identity disabled) read as
+  `UNVERIFIED` rather than being trusted.
+- **`DAN_OSS_BRIDGE_NO_AUTH=1` disables identity** (unsigned posts, unflagged reads) for the
+  original local-trust mode, intended for deployments where every writer of the bus file already
+  trusts one another. When it is set, the `agent` field is once again just a caller-asserted label.
 
 Corrupt-content tolerance *is* in scope and is fixed: as of 0.1.1 a single malformed line (invalid
 UTF-8, non-JSON, a valid-JSON non-object, or a non-numeric timestamp) is skipped rather than
-crashing every reader. A report that one bad line can deny reads to the whole bus **is** a valid
-report against older versions — please upgrade to the latest release first.
+crashing every reader, and 0.2.0 keeps that tolerance while verifying signatures. A report that one
+bad line can deny reads to the whole bus **is** a valid report against older versions — please
+upgrade to the latest release first.
 
-Two hardening options are held open as **product decisions** for a future version and are welcome
-as design discussion rather than vulnerability reports:
+One hardening option is still held open as a **product decision** for a future version, welcome as
+design discussion rather than a vulnerability report:
 
-- a **per-agent key / HMAC** to give the `agent` field real sender authenticity (parity with the
-  hosted DAN dashboard's protections); and
-- a **message-id + hash-chain** to add replay- and tamper-evidence to the log.
+- a **message-id + hash-chain** to add replay- and tamper-evidence across records (the per-message
+  HMAC shipped in 0.2.0 does not cover deletion or replay of whole lines).
 
 ## Scope
 

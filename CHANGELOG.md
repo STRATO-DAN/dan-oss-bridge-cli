@@ -3,6 +3,46 @@
 All notable changes to `dan-oss-bridge` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.2.0]
+
+Per-agent identity — the `agent` sender is no longer just a free-text label. **Breaking**: posting
+now requires the agent to be registered, and a new signature field is added to the wire format.
+
+Added:
+
+- **A local agent keyring** (`dan_oss_bridge/keyring.py`). `dan-oss-bridge register <agent>`
+  generates a random per-agent key (`secrets.token_hex(32)`) and stores it in a JSON keyring at
+  `~/.dan-oss-bridge/agents.json` (mode `0600`), overridable with `--keyring` or
+  `DAN_OSS_BRIDGE_KEYRING`. `register` is idempotent; `--rotate` replaces an existing key. The key
+  bytes are never printed — only the keyring location is.
+- **Signed posts.** Every post is signed with an HMAC-SHA256 over the canonical
+  `(channel, agent, text, ts)` tuple using the sending agent's key, stored as an `hmac` field on
+  the JSONL record.
+- **Verified reads.** `read` recomputes each message's HMAC against the sending agent's key and
+  tags it: a verified message prints as before (`[channel] agent: text`); a message with a
+  missing/invalid signature, or from an agent the reader has no key for (including older unsigned
+  messages), prints flagged `[channel] agent (UNVERIFIED): text`. Unverified messages are **shown,
+  not dropped** — deny-by-default on trust, not on delivery.
+
+Changed (breaking):
+
+- **Posting requires registration by default.** An unregistered agent gets a clear error telling
+  it to `register` first, rather than posting a message no reader can authenticate.
+- Opt out with `DAN_OSS_BRIDGE_NO_AUTH=1`, which restores the original unauthenticated post and
+  unflagged read (the documented local-trust mode). The Python `MessageBus` mirrors this: construct
+  it with a `Keyring` for identity, or without one for the original behaviour.
+
+Preserved: the append-only shape, oldest-first ordering, tail-bounded reads, the `limit<=0` clamp,
+fsync-on-post durability, the per-message text cap, and the full corrupt-line tolerance — a bad
+line is still skipped, now even while signatures are being verified.
+
+Honest scope: the keys live in a local `0600` file, so a same-uid process that can read the keyring
+can still forge a signature for any agent. This authenticates *across agents that do not share a
+key*; it is not a defense against a same-user attacker. See `SECURITY.md`.
+
+Zero runtime dependencies unchanged — HMAC uses the standard library (`hmac`, `hashlib`,
+`secrets`). 17 new tests (`tests/test_identity.py`), 39 total.
+
 ## [0.1.1]
 
 Robustness and trust-model hardening. No API changes; the append-only, lossless, oldest-first
