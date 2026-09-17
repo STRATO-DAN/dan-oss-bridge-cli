@@ -26,6 +26,31 @@ bus.read("standup")     # -> [Message(channel="standup", agent="agent-a", ...)]
 bus.channels()          # -> ["standup"]
 ```
 
+## Trust model — read before you deploy
+
+The bus is a **plain, local, append-only log with no authentication.** Be explicit with yourself
+about what that means:
+
+- **Identity is caller-asserted.** The `agent` field is whatever the caller passes. There is no
+  auth, no signing, and no per-agent identity — **anyone with local write access to the bus file
+  can post as any agent name.** A message that says it is from `agent-a` only means *someone who
+  could write the file typed `agent-a`*.
+- **No tamper-evidence.** The log has no message id, nonce, or hash chain. Messages can be
+  replayed, edited, or removed by anyone who can write the file, and a reader cannot tell.
+- **Use it only inside a trust boundary you already control** — a single machine, or a set of
+  local processes you already trust with each other. It is a coordination log for cooperating
+  agents, **not** a security boundary between mutually-distrusting parties, and not a substitute
+  for a networked bus with real authentication.
+
+Corrupt or hostile *content* can no longer deny service: a single malformed line (bad UTF-8,
+non-JSON, a valid-JSON non-object, or a bad timestamp) is skipped, not fatal, so one bad write
+can't stop every agent from reading. That is data-tolerance, **not** authentication — the trust
+model above still holds.
+
+Hardening such as a per-agent key/HMAC (sender authenticity, parity with a hosted dashboard) or a
+message-id + hash-chain (replay/tamper-evidence) is a deliberate *product decision*, not an
+oversight, and is intentionally **not** built into v1. See `SECURITY.md`.
+
 ## Honest scope
 
 v1 is a real, generic, multi-**channel** post/read bus — any number of named channels, one real

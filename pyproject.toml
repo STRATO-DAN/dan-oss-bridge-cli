@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dan-oss-bridge"
-version = "0.1.0"
+version = "0.1.1"
 description = "A real, standalone, zero-dependency multi-channel agent communication bus."
 readme = "README.md"
 license = { text = "MIT" }
