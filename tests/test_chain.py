@@ -150,10 +150,11 @@ class VerifyCleanTests(unittest.TestCase):
         self.assertFalse(report.tampered)
         self.assertTrue(report.clean())
 
-    def test_missing_log_is_clean(self):
+    def test_missing_log_cannot_be_assessed_as_clean(self):
         report = verify_log(Path(self._tmp.name) / "nope.jsonl", self.kr)
         self.assertEqual(report.total, 0)
-        self.assertTrue(report.clean())
+        self.assertFalse(report.clean())
+        self.assertTrue(report.missing)
 
 
 class VerifyDetectsTamperingTests(unittest.TestCase):
