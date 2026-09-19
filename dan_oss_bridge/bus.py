@@ -117,7 +117,7 @@ class MessageBus:
             # verify. The hash chain (prev) binds ordering/completeness as a separate layer.
             mac = _sign(key, channel, agent, text, ts)
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         if self.chain:
             # Under the lock so the read-tip-then-append is atomic and the chain stays linear even
@@ -141,7 +141,8 @@ class MessageBus:
         # post best-effort durable on disk; fsync is best-effort because some filesystems /
         # platforms don't support it, and there is intentionally no atomic rename — a concurrent
         # reader that catches a half-written final line simply skips it (see read()).
-        with self.path.open("a", encoding="utf-8") as f:
+        fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(line)
             f.flush()
             try:
