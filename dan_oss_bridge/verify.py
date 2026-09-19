@@ -221,8 +221,14 @@ def _classify_auth(fields: dict, keyring: Keyring | None):
     key = keyring.get(fields["agent"])
     if key is None:
         return "forged", f"no key for agent {fields['agent']!r} — cannot authenticate"
-    if _verify_hmac(key, fields["channel"], fields["agent"], fields["text"], fields["ts"], mac):
+    # Sealed (v2) records are checked against their stored chain position first, legacy (v1)
+    # second — so a sealed record copied to a new tail fails (position mismatch on both forms),
+    # while every pre-seal signature verifies exactly as before. See keyring._canonical_bytes.
+    # Success stays note-free (a verifying record needs no annotation); failures explain below.
+    if _verify_hmac(key, fields["channel"], fields["agent"], fields["text"], fields["ts"], mac, fields["prev"]):
         return "ok", ""
+    if fields["prev"]:
+        return "forged", "signature does not match the record content at its stored chain position"
     return "forged", "signature does not match the record content"
 
 
@@ -258,9 +264,15 @@ def format_report(report: LogReport, strict: bool = False) -> str:
         lines.append("MISSING LOG: no integrity assessment is possible")
     if report.replayed:
         lines.append(f"DUPLICATE SIGNED RECORDS: {report.replayed}; possible replay")
-    lines.append("VERDICT: " + ("clean" if report.clean(strict=strict)
-                                else "TAMPERING DETECTED" if report.tampered
-                                else "not clean (missing log, duplicate signatures, or strict verification failure)"))
+    verdict = ("clean" if report.clean(strict=strict)
+               else "TAMPERING DETECTED" if report.tampered
+               else "not clean (missing log, duplicate signatures, or strict verification failure)")
+    # A non-strict "clean" over unsigned records is local-trust only — say so on the verdict
+    # line itself, so it can never be read as "every record authenticated".
+    if verdict == "clean" and not strict and report.unsigned > 0:
+        verdict = (f"clean (local-trust only: {report.unsigned} unsigned record(s) present "
+                   f"— use --strict to require signatures)")
+    lines.append("VERDICT: " + verdict)
     return "\n".join(lines)
 
 
