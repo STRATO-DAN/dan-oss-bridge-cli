@@ -3,6 +3,16 @@
 All notable changes to `dan-oss-bridge` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.5.1] — 2026-09-19
+
+### Fixed
+
+- **Sealed HMAC (Finding 01).** Chained+signed posts now bind the chain position into the
+  MAC under a versioned canonical form: a record copied and re-pointed at a new tail fails
+  verification instead of verifying twice. Dual sealed-then-legacy verify keeps every
+  pre-seal signature verifying — no history bricked. Non-strict verify names unsigned
+  records on the verdict line (local-trust only).
+
 ## [0.5.0] — 2026-09-19
 
 ### Security
