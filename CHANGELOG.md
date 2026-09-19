@@ -3,6 +3,21 @@
 All notable changes to `dan-oss-bridge` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.5.0] — 2026-09-19
+
+### Security
+
+- **Terminal-safe output.** `channel`/`agent`/`text`/`note` fields are attacker-controlled (any
+  sender can write them) and were printed to the operator's terminal verbatim, risking raw
+  ANSI/control-sequence injection. All output paths (`read` and `verify`) now escape non-printable
+  characters.
+- **File/directory permissions restricted to owner-only** (0700 dir / 0600 file) for the bus log.
+- `verify_log()` now treats a **missing log file** as not-clean (was: trivially reported "clean"),
+  a **non-finite `ts`** as corrupt instead of silently coercing to 0.0, and detects **duplicate
+  signed records** (possible replay), reported separately from tampering.
+- `verify` now always checks against the keyring when one exists, regardless of `NO_AUTH`
+  (posting-time auth and read-time integrity checking are different concerns).
+
 ## [0.4.0]
 
 Cross-cutting polish: the CLI now speaks JSON on every read path, documents a uniform exit-code
