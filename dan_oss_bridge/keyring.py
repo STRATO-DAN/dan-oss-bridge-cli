@@ -2,9 +2,11 @@
 
 Each agent that posts is registered with a random secret key, kept in a local JSON keyring file
 (`~/.dan-oss-bridge/agents.json` by default, mode 0600). A posted message carries an
-HMAC-SHA256 over its canonical (channel, agent, text, ts) tuple, computed with the sending agent's
-key. A reader recomputes the HMAC with the same agent's key to decide whether the sender label is
-authentic.
+HMAC-SHA256 over its canonical tuple, computed with the sending agent's key. A reader
+recomputes the HMAC with the same agent's key to decide whether the sender label is authentic.
+Unchained posts sign the v1 tuple (channel, agent, text, ts); chained posts seal the chain
+position too (v2: version, tuple, prev) so a copied record replayed at a new tail fails —
+while every v1 signature ever written still verifies (see _canonical_bytes).
 
 HONEST SCOPE — read this before relying on it: the keys live in a local file that any process
 running as the same user can read. A same-uid attacker who can read the keyring can therefore forge
@@ -40,29 +42,45 @@ def default_keyring_path() -> str:
     )
 
 
-def _canonical_bytes(channel: str, agent: str, text: str, ts: float) -> bytes:
-    """One unambiguous byte string for (channel, agent, text, ts). A JSON array is used rather than
-    a delimiter-joined string so a field that itself contains the delimiter cannot be rearranged to
-    collide with a different tuple. `ts` is included exactly as the float that is stored, and JSON
-    round-trips a Python float losslessly, so post and read canonicalise the same bytes."""
+def _canonical_bytes(channel: str, agent: str, text: str, ts: float, prev: str = "") -> bytes:
+    """One unambiguous byte string for a record. Two versions, domain-separated by a leading
+    version element so they can never cross-verify:
+      v1 (prev == ""): [channel, agent, text, ts] — the exact 0.2.0/0.3.0/0.4.0 bytes. Every
+        signature ever written verifies here, forever; history is never invalidated.
+      v2 (prev != ""): [2, channel, agent, text, ts, prev] — binds the chain position into the
+        MAC, so a copied record replayed at a new tail fails verification (prev differs).
+    A JSON array is used rather than a delimiter-joined string so a field that itself contains
+    the delimiter cannot be rearranged to collide with a different tuple. `ts` is included
+    exactly as the float that is stored, and JSON round-trips a Python float losslessly, so post
+    and read canonicalise the same bytes."""
+    if prev:
+        return json.dumps(
+            [2, channel, agent, text, ts, prev], separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8", "surrogatepass")
     return json.dumps(
         [channel, agent, text, ts], separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8", "surrogatepass")
 
 
-def sign(key_hex: str, channel: str, agent: str, text: str, ts: float) -> str:
-    """HMAC-SHA256 of the canonical tuple under the agent's key, hex-encoded."""
+def sign(key_hex: str, channel: str, agent: str, text: str, ts: float, prev: str = "") -> str:
+    """HMAC-SHA256 of the canonical record under the agent's key, hex-encoded. `prev=""` signs
+    exactly as before (v1, byte-identical); a non-empty `prev` seals the chain position (v2)."""
     return hmac.new(
-        bytes.fromhex(key_hex), _canonical_bytes(channel, agent, text, ts), hashlib.sha256
+        bytes.fromhex(key_hex), _canonical_bytes(channel, agent, text, ts, prev), hashlib.sha256
     ).hexdigest()
 
 
-def verify(key_hex: str, channel: str, agent: str, text: str, ts: float, mac: str) -> bool:
-    """True only if `mac` is a valid HMAC for the tuple under `key_hex`. A missing key or missing
+def verify(key_hex: str, channel: str, agent: str, text: str, ts: float, mac: str, prev: str = "") -> bool:
+    """True only if `mac` is valid under `key_hex`. With a non-empty `prev` the sealed (v2)
+    form is tried first and the legacy (v1) form second — so chained records written before
+    sealing existed still verify, while a sealed record copied to a new tail fails both (its
+    stored prev no longer matches, and its MAC is not a legacy MAC). A missing key or missing
     mac is a verification failure, never an exception. Uses a constant-time comparison."""
     if not key_hex or not mac:
         return False
     try:
+        if prev and hmac.compare_digest(sign(key_hex, channel, agent, text, ts, prev), mac):
+            return True
         expected = sign(key_hex, channel, agent, text, ts)
     except ValueError:
         # bytes.fromhex on a malformed stored key — treat as unverifiable, don't crash the read.

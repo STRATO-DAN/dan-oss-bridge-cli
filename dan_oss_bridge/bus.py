@@ -112,19 +112,26 @@ class MessageBus:
                 raise UnregisteredAgentError(
                     f"agent {agent!r} is not registered — run: dan-oss-bridge register {agent}"
                 )
-            # The signature covers (channel, agent, text, ts) exactly as in 0.2.0 — it deliberately
-            # does NOT cover the chain link, so signatures written before chaining existed still
-            # verify. The hash chain (prev) binds ordering/completeness as a separate layer.
-            mac = _sign(key, channel, agent, text, ts)
+            # Chained posts seal the chain position into the MAC (v2): the tip hash is read
+            # under the same lock as the append, so the signature binds THIS position — a copy of
+            # the record replayed at a later tail fails verification (its stored prev differs).
+            # Unchained posts keep the exact v1 signature (byte-identical history, always verifiable).
+            mac = None  # computed below, once prev is known
+            if not self.chain:
+                mac = _sign(key, channel, agent, text, ts)
 
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         if self.chain:
-            # Under the lock so the read-tip-then-append is atomic and the chain stays linear even
-            # with concurrent posters (the lock-free default cannot offer this — see _chain_lock).
+            # Under the lock so the read-tip-then-append stays atomic and the chain stays linear
+            # even with concurrent posters (the lock-free default cannot offer this). The seal is
+            # computed on the same tip the append stores, so position and signature agree.
             with self._chain_lock():
                 prev = self._chain_tip_hash()
+                if mac is None:
+                    mac = _sign(key, channel, agent, text, ts, prev)
                 return self._append(channel, agent, text, ts, mac, prev)
+        assert mac is not None
         return self._append(channel, agent, text, ts, mac, "")
 
     def _append(self, channel: str, agent: str, text: str, ts: float, mac: str, prev: str) -> Message:
