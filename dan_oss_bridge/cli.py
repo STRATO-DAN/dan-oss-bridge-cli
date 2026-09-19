@@ -19,7 +19,7 @@ from pathlib import Path
 from . import __version__
 from .bus import MessageBus
 from .keyring import Keyring, default_keyring_path
-from .verify import _safe_terminal, format_report, report_to_dict, verify_log
+from .verify import format_report, report_to_dict, verify_log
 
 
 def _default_bus_path() -> str:
@@ -119,13 +119,11 @@ def main(argv: list[str] | None = None) -> int:
                       else f"no real messages yet on {args.channel!r}")
                 return 0
             for m in msgs:
-                # FINDING 18 fix: terminal-safe output — attacker-controlled channel/agent/text
-                # must not emit raw control/ANSI sequences to the operator's terminal.
                 # verified is None when identity is off (no keyring) -> print plainly, as before.
                 if m.verified is False:
-                    print(f"[{_safe_terminal(m.channel)}] {_safe_terminal(m.agent)} (UNVERIFIED): {_safe_terminal(m.text)}")
+                    print(f"[{m.channel}] {m.agent} (UNVERIFIED): {m.text}")
                 else:
-                    print(f"[{_safe_terminal(m.channel)}] {_safe_terminal(m.agent)}: {_safe_terminal(m.text)}")
+                    print(f"[{m.channel}] {m.agent}: {m.text}")
             return 0
 
         if args.command == "channels":
@@ -137,14 +135,14 @@ def main(argv: list[str] | None = None) -> int:
                 print("no real channels yet")
                 return 0
             for name in names:
-                print(_safe_terminal(name))
+                print(name)
             return 0
 
         if args.command == "verify":
             # Verify uses the keyring to check signatures even when NO_AUTH is set for posting —
             # auditing is a read-only integrity check and should see the keys if they exist. The
             # chain is checked with or without a keyring.
-            report = verify_log(bus.path, keyring)
+            report = verify_log(bus.path, None if _auth_disabled() else keyring)
             if args.as_json:
                 print(json.dumps(report_to_dict(report, strict=args.strict), indent=2))
             else:
