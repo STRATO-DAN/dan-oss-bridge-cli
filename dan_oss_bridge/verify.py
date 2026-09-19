@@ -22,6 +22,7 @@ Zero dependencies — standard library only.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,6 +54,8 @@ class LogReport:
     forged: int = 0
     unsigned: int = 0
     corrupt: int = 0
+    replayed: int = 0
+    missing: bool = False
     # Whether any record in the log carried a ``prev`` (i.e. the log is chained at all).
     chain_present: bool = False
     # True when the chain is present and every link verified; None when no chain is present.
@@ -77,7 +80,7 @@ class LogReport:
     def clean(self, strict: bool = False) -> bool:
         """True when the log shows no tampering. With ``strict``, any unsigned or unverified record
         also fails (use in a deployment that expects every message to be signed)."""
-        if self.tampered:
+        if self.tampered or self.missing or self.replayed:
             return False
         if strict and (self.unsigned > 0 or self.forged > 0):
             return False
@@ -105,7 +108,9 @@ def _extract(raw: str):
     try:
         ts = float(d.get("ts", 0.0))
     except (TypeError, ValueError):
-        ts = 0.0
+        return "corrupt"
+    if not math.isfinite(ts):
+        return "corrupt"
     mac = d.get("hmac", "")
     if not isinstance(mac, str):
         mac = ""
@@ -129,6 +134,7 @@ def verify_log(path: str | Path, keyring: Keyring | None = None) -> LogReport:
     p = Path(path)
     report = LogReport(path=str(p), keyring_available=keyring is not None)
     if not p.is_file():
+        report.missing = True
         return report
 
     # ``expected`` is the link hash the NEXT chained record must store as its ``prev``. It starts at
@@ -136,6 +142,7 @@ def verify_log(path: str | Path, keyring: Keyring | None = None) -> LogReport:
     # iff its stored ``prev`` equals ``expected`` at that point. A corrupt line makes ``expected``
     # unknown (None), which correctly breaks any chained record that follows it.
     expected: "str | None" = GENESIS
+    seen_signed = set()
 
     with p.open("r", encoding="utf-8", errors="replace") as f:
         for i, raw in enumerate(f, start=1):
@@ -157,6 +164,12 @@ def verify_log(path: str | Path, keyring: Keyring | None = None) -> LogReport:
 
             # --- content authenticity (HMAC) ---
             auth, note = _classify_auth(fields, keyring)
+            if fields["hmac"]:
+                fingerprint = (fields["channel"], fields["agent"], fields["text"], fields["ts"], fields["hmac"])
+                if fingerprint in seen_signed:
+                    report.replayed += 1
+                    note = "duplicate signed record: possible replay; " + note
+                seen_signed.add(fingerprint)
             if auth == "ok":
                 report.ok += 1
             elif auth == "forged":
@@ -223,8 +236,8 @@ def format_report(report: LogReport, strict: bool = False) -> str:
         if r.auth == "corrupt":
             body = "(unparseable line)"
         else:
-            body = f"[{r.channel}] {r.agent}: {r.text}"
-        suffix = f"  <- {r.note}" if r.note else ""
+            body = f"[{_safe_terminal(r.channel)}] {_safe_terminal(r.agent)}: {_safe_terminal(r.text)}"
+        suffix = f"  <- {_safe_terminal(r.note)}" if r.note else ""
         lines.append(f"{head} {body}{suffix}")
 
     if report.chain_present:
@@ -241,9 +254,13 @@ def format_report(report: LogReport, strict: bool = False) -> str:
     if not report.keyring_available:
         lines.append("(no keyring available — signatures were not checked)")
     lines.append(chain_verdict)
+    if report.missing:
+        lines.append("MISSING LOG: no integrity assessment is possible")
+    if report.replayed:
+        lines.append(f"DUPLICATE SIGNED RECORDS: {report.replayed}; possible replay")
     lines.append("VERDICT: " + ("clean" if report.clean(strict=strict)
                                 else "TAMPERING DETECTED" if report.tampered
-                                else "not clean (strict: unsigned/unverified records present)"))
+                                else "not clean (missing log, duplicate signatures, or strict verification failure)"))
     return "\n".join(lines)
 
 
@@ -256,6 +273,8 @@ def report_to_dict(report: LogReport, strict: bool = False) -> dict:
         "forged": report.forged,
         "unsigned": report.unsigned,
         "corrupt": report.corrupt,
+        "missing": report.missing,
+        "replayed": report.replayed,
         "chain_present": report.chain_present,
         "chain_intact": report.chain_intact,
         "first_break_line": report.first_break_line,
@@ -275,3 +294,7 @@ def report_to_dict(report: LogReport, strict: bool = False) -> dict:
             for r in report.records
         ],
     }
+
+
+def _safe_terminal(value: str) -> str:
+    return "".join(char if char.isprintable() else f"\\u{ord(char):04x}" for char in value)
