@@ -35,11 +35,16 @@ _KEY_BYTES = 32
 
 
 def default_keyring_path() -> str:
-    """Where the keyring lives unless overridden. `DAN_OSS_BRIDGE_KEYRING` wins; otherwise the
-    per-user default alongside the default bus file."""
-    return os.environ.get("DAN_OSS_BRIDGE_KEYRING") or str(
-        Path.home() / ".dan-oss-bridge" / "agents.json"
-    )
+    """Where the keyring lives unless overridden. `DAN_OSS_BRIDGE_KEYRING` wins; otherwise a
+    per-project default alongside the default bus file (see `project.py` — a shared global default
+    here would mean every project's agents register into, and can read the identity of, the same
+    keyring)."""
+    override = os.environ.get("DAN_OSS_BRIDGE_KEYRING")
+    if override:
+        return override
+    from .project import project_namespace
+
+    return str(Path.home() / ".dan-oss-bridge" / project_namespace() / "agents.json")
 
 
 def _canonical_bytes(channel: str, agent: str, text: str, ts: float, prev: str = "") -> bytes:
