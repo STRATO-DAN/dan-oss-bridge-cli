@@ -23,7 +23,37 @@ from .verify import _safe_terminal, format_report, report_to_dict, verify_log
 
 
 def _default_bus_path() -> str:
-    return os.environ.get("DAN_OSS_BRIDGE_BUS") or str(Path.home() / ".dan-oss-bridge" / "bus.jsonl")
+    """The real bus file unless overridden. `DAN_OSS_BRIDGE_BUS` wins; otherwise a per-project
+    default (see `project.py`) — a shared global default here is exactly the cross-project
+    confidentiality leak found in Muse's 2026-09-24 review: any project using the default lands in
+    the same bus, readable by every other project's agents on the same machine."""
+    override = os.environ.get("DAN_OSS_BRIDGE_BUS")
+    if override:
+        return override
+    from .project import project_namespace
+
+    return str(Path.home() / ".dan-oss-bridge" / project_namespace() / "bus.jsonl")
+
+
+def _archive_legacy_shared_bus_file(name: str) -> None:
+    """One-time, best-effort migration off the old global default (`~/.dan-oss-bridge/bus.jsonl`
+    or `agents.json`, now that the default is per-project — see `project.py`). Renames the legacy
+    file aside with a fixed, dated suffix rather than deleting or auto-merging it into a project's
+    new namespaced file: a shared-bus log mixes messages from whichever projects used to default
+    into it, and that mixed history can't be honestly un-mixed after the fact (Muse's review
+    recommendation). Idempotent — does nothing once the archive file already exists, so this is
+    safe to call on every invocation. Never raises: a permissions/IO problem here must never block
+    the actual command the caller is running. Only called (see `main`) when this invocation is
+    about to use the default path for `name` — never touches a file the caller pointed at
+    explicitly via `--bus`/`--keyring` or the matching env var."""
+    legacy_dir = Path.home() / ".dan-oss-bridge"
+    legacy = legacy_dir / name
+    archived = legacy_dir / f"{name}.pre-2026-09-24-project-isolation-archive"
+    try:
+        if legacy.is_file() and not archived.exists():
+            legacy.rename(archived)
+    except OSError:
+        pass
 
 
 def _auth_disabled() -> bool:
@@ -77,6 +107,15 @@ def main(argv: list[str] | None = None) -> int:
                           help="also fail (non-zero exit) if any message is unsigned or unverified")
 
     args = parser.parse_args(argv)
+
+    # Only when this invocation is actually about to use a DEFAULT path for bus and/or keyring
+    # (no --bus/--keyring flag, no DAN_OSS_BRIDGE_BUS/DAN_OSS_BRIDGE_KEYRING override) is the old
+    # global-shared file still in the way — archive it aside so it can't be read by mistake.
+    # Never touches a file the caller explicitly pointed at.
+    if args.bus is None and os.environ.get("DAN_OSS_BRIDGE_BUS") is None:
+        _archive_legacy_shared_bus_file("bus.jsonl")
+    if args.keyring is None and os.environ.get("DAN_OSS_BRIDGE_KEYRING") is None:
+        _archive_legacy_shared_bus_file("agents.json")
 
     keyring_path = args.keyring or default_keyring_path()
     keyring = Keyring(keyring_path)

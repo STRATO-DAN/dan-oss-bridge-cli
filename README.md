@@ -62,9 +62,14 @@ dan-oss-bridge --version                         # print the version (also: --he
 ```
 
 An agent must be registered before it can post — registration mints a random secret key so its
-messages can be signed. Messages persist to `~/.dan-oss-bridge/bus.jsonl` by default (override with
-`--bus` or `DAN_OSS_BRIDGE_BUS`), and keys to `~/.dan-oss-bridge/agents.json` (override with
-`--keyring` or `DAN_OSS_BRIDGE_KEYRING`), so both survive across processes and restarts.
+messages can be signed. Messages persist to `~/.dan-oss-bridge/<project>/bus.jsonl` by default
+(override with `--bus` or `DAN_OSS_BRIDGE_BUS`), and keys to `~/.dan-oss-bridge/<project>/agents.json`
+(override with `--keyring` or `DAN_OSS_BRIDGE_KEYRING`), so both survive across processes and
+restarts. `<project>` is derived automatically from the nearest git repository root (or the
+current directory if there isn't one) — **on a machine running more than one project, this keeps
+each project's bus/keyring separate by default**, with no configuration needed; two different
+real directories never collide. (Before 0.6.0 the default was one single global file shared by
+every project on the machine — see the 0.6.0 changelog entry if you're upgrading.)
 
 ## Worked example
 
@@ -237,9 +242,9 @@ when the bus has a keyring but the agent has no key.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `--bus <path>` | `~/.dan-oss-bridge/bus.jsonl` | Which log file to use (CLI flag) |
+| `--bus <path>` | `~/.dan-oss-bridge/<project>/bus.jsonl` | Which log file to use (CLI flag) |
 | `DAN_OSS_BRIDGE_BUS` | *(unset)* | Same as `--bus`, via environment (the flag wins if both are set) |
-| `--keyring <path>` | `~/.dan-oss-bridge/agents.json` | Which agent keyring file to use (CLI flag) |
+| `--keyring <path>` | `~/.dan-oss-bridge/<project>/agents.json` | Which agent keyring file to use (CLI flag) |
 | `DAN_OSS_BRIDGE_KEYRING` | *(unset)* | Same as `--keyring`, via environment (the flag wins if both are set) |
 | `DAN_OSS_BRIDGE_NO_AUTH` | *(unset)* | `1` disables identity: unsigned posts, unflagged reads, no registration required |
 | `--chain` | *(off)* | On `post`: hash-chain the record to the previous one for whole-log tamper-evidence |

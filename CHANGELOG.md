@@ -3,6 +3,26 @@
 All notable changes to `dan-oss-bridge` are documented here.
 This project uses [semantic versioning](https://semver.org/).
 
+## [0.6.0] — 2026-09-24
+
+### Security
+
+- **Per-project default bus/keyring (breaking default change).** On a shared, multi-project
+  machine, every caller that used the plain defaults (`~/.dan-oss-bridge/bus.jsonl`,
+  `~/.dan-oss-bridge/agents.json`) landed in the SAME file — any project's agents could read
+  every other project's message content (HMACs prove authenticity, not confidentiality).
+  `DAN_OSS_BRIDGE_BUS`/`DAN_OSS_BRIDGE_KEYRING` (and `--bus`/`--keyring`) already let an operator
+  opt into isolation, but nothing opted in by default. The default is now namespaced per project
+  (the nearest git repository root, or the resolved working directory if none) — automatic, no
+  configuration required, and two different real directories never collide. An explicit
+  `--bus`/`--keyring` flag or env var still always wins outright, unchanged.
+- **One-time legacy archive.** The first invocation that would use a default path and finds the
+  old global `bus.jsonl`/`agents.json` still there renames it aside
+  (`*.pre-2026-09-24-project-isolation-archive`) rather than deleting it or silently merging it
+  into a project's new namespaced file — a shared-bus log mixes messages from whichever projects
+  used to default into it, and that mixed history can't be honestly un-mixed after the fact.
+  Idempotent; never touches a file the caller pointed at explicitly.
+
 ## [0.5.1] — 2026-09-19
 
 ### Fixed
